@@ -1,0 +1,39 @@
+// TypeScript config for all web view main thread code.
+{
+  "$schema": "https://json.schemastore.org/tsconfig.json",
+  "compilerOptions": {
+    "lib": [
+      "DOM",
+      "ES2025",
+      "esnext.disposable",
+      "dom.iterable",
+      "esnext"
+    ],
+    "target": "ESNext",
+    "module": "ESNext",
+    "composite": true,
+    "allowImportingTsExtensions": true,
+    "erasableSyntaxOnly": true,
+    "allowUnreachableCode": false,
+    "allowUnusedLabels": false,
+    "forceConsistentCasingInFileNames": true,
+    "noImplicitOverride": true,
+    "noUncheckedIndexedAccess": true,
+    "noUncheckedSideEffectImports": true,
+    "noUnusedLocals": true,
+    "resolveJsonModule": true,
+    "strict": true,
+    "types": [],
+    "isolatedDeclarations": true,
+    "isolatedModules": true,
+    "esModuleInterop": true,
+    "rewriteRelativeImportExtensions": true,
+    "skipLibCheck": true,
+    "skipDefaultLibCheck": true,
+    "sourceMap": true,
+    "declarationMap": true,
+    "verbatimModuleSyntax": true,
+    "rootDir": "./src",
+    "outDir": "./dist"
+  }
+}

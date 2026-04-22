@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang=en>
+<head>
+    <meta charset=UTF-8>
+    <title>Tester</title>
+</head>
+<body>
+<vn-viewbox>
+    <span slot=start-text>START</span>
+    <vn-script autoplay>
+        <vn-text>hello</vn-text>
+        <vn-event></vn-event>
+    </vn-script>
+</vn-viewbox>
+<script type=module>
+    import "./dist/vn-viewbox.js";
+
+    document.querySelector('vn-event').timeout = 500;
+    document.querySelector('vn-viewbox').addEventListener('vnscriptend', console.log, {once: true});
+</script>
+</body>
+</html>

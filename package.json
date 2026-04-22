@@ -1,0 +1,17 @@
+{
+  "name": "vn-viewbox",
+  "version": "0.0.0",
+  "description": "",
+  "keywords": [
+  ],
+  "author": "binary-ant",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {},
+  "main": "./dist/Datetime_global.js",
+  "types": "./dist/Datetime_global.d.ts",
+  "dependencies": {},
+  "files": [
+    "dist"
+  ]
+}
