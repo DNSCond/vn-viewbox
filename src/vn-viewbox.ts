@@ -6,30 +6,68 @@ export class VNViewBoxBase extends HTMLElement {
 }
 
 export class VNVarContainer extends VNViewBoxBase {
-    getVariable(name: string): string | null | undefined {
+    variablesAllowed = true;
+
+    getVariable(name: string): string | null {
         if (/^[a-z\-0-9_]+$/i.test(name)) {
             const localname = `data-varset-${name}`;
-            return this.getAttribute(localname);
+            const value = this.getAttribute(localname);
+            if (typeof value === 'string') return value;
+            if (/^local-/i.test(name)) return null;
+            let parent: HTMLElement | undefined | null = this;
+            // noinspection JSAssignmentUsedAsCondition
+            while (parent = parent?.parentElement) {
+                if ((parent instanceof VNVarContainer) && parent.variablesAllowed) {
+                    return parent.getVariable(name);
+                }
+            }
         }
-        return undefined;
+        return null;
     }
 
-    setVariable(name: string, value: string | null | undefined): void {
-        if (name && /^[a-z\-0-9_]+$/i.test(name)) {
-            const localname = `data-varset-${name}`;
-            if (typeof value === 'string') {
-                this.setAttribute(localname, value);
-            } else {
-                this.removeAttribute(localname);
+    setVariable(name: string, value: string | null): void {
+        if (this.variablesAllowed) {
+            if (name && /^[a-z\-0-9_]+$/i.test(name)) {
+                const localname = `data-varset-${name}`;
+                if (typeof value === 'string') {
+                    this.setAttribute(localname, value);
+                } else {
+                    this.removeAttribute(localname);
+                }
+            }
+        } else {
+            let parent: HTMLElement | undefined | null = this;
+            // noinspection JSAssignmentUsedAsCondition
+            while (parent = parent?.parentElement) {
+                if ((parent instanceof VNVarContainer) && parent.variablesAllowed) {
+                    parent.setVariable(name, value);
+                }
             }
         }
     }
 
+    delVariable(name: string): void {
+        this.setVariable(name, null);
+    }
+
     getAllVariables(): Attr[] {
         return Array.from(this.attributes, attribute => {
-            if (attribute.name.startsWith('data-varset-')) return attribute;
-            return null;
+            if (attribute.name.startsWith('data-varset-')) {
+                return attribute;
+            } else return null;
         }).filter(attribute => attribute) as Attr[];
+    }
+
+    getVariableNumber(name: string): number | null {
+        const value = this.getVariable(name);
+        if (typeof value === 'string') return +value;
+        return null;
+    }
+
+    getVariableBoolean(name: string): boolean {
+        const value = this.getVariable(name);
+        // boolean attributes are HTML attributes, absence equals false.
+        return typeof value === 'string';
     }
 }
 
@@ -74,7 +112,6 @@ export class VNViewBox extends VNVarContainer {
             div.style.height = '30%';
             div.style.width = '100%';
             div.style.top = '75%';
-            div.style.top = '75%';
             // noinspection JSIgnoredPromiseFromCall
             autoplay.run(this);
         }
@@ -112,7 +149,7 @@ export class VNScript extends VNVarContainer {
 
     async run(vnViewBox: VNViewBox): Promise<void> {
         const event = new CustomEvent('vn-scriptstart', {
-            detail: null, cancelable: false,
+            detail: {'this': this}, cancelable: false,
             bubbles: true, composed: true,
         });
         this.dispatchEvent(event);
@@ -133,18 +170,18 @@ export class VNScript extends VNVarContainer {
                     const execEvent = new CustomEvent('vn-exec', {
                             bubbles: true, cancelable: true, detail: {vn: vnViewBox},
                         }), abortController = new AbortController, {signal} = abortController,
-                        {promise, resolve, reject} = Promise.withResolvers();
+                        {promise, resolve} = Promise.withResolvers();
                     promise.then(() => void abortController.abort());
                     vnViewBox.addEventListener('vn-resume', resolve, {signal, once: true});
                     if (!this.#currentElement.dispatchEvent(execEvent)) {
                         await promise;
                         continue;
-                    } else reject();
+                    } else resolve(undefined);
                     await (this.#currentElement as VNExecutableTag).vnExecute(vnViewBox, this);
                 }
             } while (this.#noskip || (this.#currentElement = this.#currentElement.nextElementSibling));
             const event = new CustomEvent('vn-scriptend', {
-                detail: null, cancelable: false,
+                detail: {'this': this}, cancelable: false,
                 bubbles: true, composed: true,
             });
             this.dispatchEvent(event);
@@ -375,7 +412,13 @@ export class VNSetVar extends VNInternalExecutableTag {
     vnExecute(vn: VNViewBox, currentScript: VNScript): void {
         const {name, value} = this;
         if (typeof name === 'string') {
-            switch (this.scope) {
+            if (this.deleteVariable) switch (this.scope) {
+                case 'script':
+                    currentScript.delVariable(name as string);
+                    break;
+                default:
+                    vn.delVariable(name as string);
+            } else switch (this.scope) {
                 case 'script':
                     currentScript.setVariable(name as string, (value ?? this.textContent?.trim()) || null);
                     break;
@@ -411,21 +454,44 @@ export class VNSetVar extends VNInternalExecutableTag {
         if (value === null) this.removeAttribute('scope');
         else this.setAttribute('scope', value);
     }
+
+    get deleteVariable(): boolean {
+        return this.hasAttribute('delete-attr');
+    }
+
+    set deleteVariable(value: boolean) {
+        setBooleanAttribute(this, 'delete-attr', value);
+    }
 }
 
 export class VNIf extends VNExecutableTag {
     async vnExecute(vn: VNViewBox, _currentScript: VNScript): Promise<void> {
-        let currentElement = this.firstElementChild, value = true;
+        let currentElement = this.firstElementChild,
+            value = true, anythingRan = false;
         if (currentElement) do {
             const logical = (currentElement as any).logical;
             if (logical) {
                 value = (currentElement as any).executeLogic(logical, value, vn);
-            } else if ((currentElement instanceof VNScript) && value) {
-                await currentElement.run(vn);
+            } else if (currentElement instanceof VNElse) {
+                if (!anythingRan) await currentElement.run(vn);
+                if (this.evaluationType !== 'run-all') return;
+            } else if (currentElement instanceof VNScript) {
+                if (value) await currentElement.run(vn);
+                anythingRan = true;
                 // reset the accumulator for else if branches.
                 value = true;
+                if (this.evaluationType !== 'run-all') return;
             }
         } while ((currentElement = currentElement.nextElementSibling));
+    }
+
+    get evaluationType(): string | null {
+        return this.getAttribute('evaluation-type');
+    }
+
+    set evaluationType(value: 'run-one' | 'run-all' | null) {
+        if (value === null) this.removeAttribute('evaluation-type');
+        else this.setAttribute('evaluation-type', value);
     }
 }
 
@@ -536,6 +602,10 @@ export class VNNOT extends VNLogic {
     readonly logical = 'NOT';
 }
 
+class VNElse extends VNScript {
+    override variablesAllowed = false;
+}
+
 const styles = `:host {
     display: block;
     position: relative;
@@ -577,6 +647,7 @@ const elements = {
     'vn-jumpto': VNJumpTo,
     'vn-event': VNEvent,
     'vn-text': VNText,
+    'vn-else': VNElse,
     'vn-opt': VNOpt,
     'vn-and': VNAnd,
     'vn-not': VNNOT,
