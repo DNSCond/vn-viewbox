@@ -1,13 +1,33 @@
 // vn-viewbox.ts
+/**
+ * the base tag for identification
+ */
 export class VNViewBoxBase extends HTMLElement {
     get [Symbol.toStringTag](): string {
         return `VN-ViewBox(${this.constructor.name})`;
     }
 }
 
+/**
+ * the variable container. for inheritance only.
+ *
+ * to disable the storage of variables add `variablesAllowed = false;`
+ *
+ * variables are prefixed with `data-varset-`
+
+ * Variables cascade upward through parent VNVarContainers.
+ * Prefix with 'local-' to prevent upward traversal.
+ *
+ * @example
+ * <vn-viewbox data-varset-player="Alice"> <!-- global -->
+ *   <vn-script data-varset-local-temp="secret"> <!-- script-only -->
+ */
 export class VNVarContainer extends VNViewBoxBase {
     variablesAllowed = true;
 
+    /**
+     * return a variable with name.
+     */
     getVariable(name: string): string | null {
         if (/^[a-z\-0-9_]+$/i.test(name)) {
             const localname = `data-varset-${name}`;
@@ -50,6 +70,9 @@ export class VNVarContainer extends VNViewBoxBase {
         this.setVariable(name, null);
     }
 
+    /**
+     * returns all variable as attr nodes.
+     */
     getAllVariables(): Attr[] {
         return Array.from(this.attributes, attribute => {
             if (attribute.name.startsWith('data-varset-')) {
@@ -58,12 +81,18 @@ export class VNVarContainer extends VNViewBoxBase {
         }).filter(attribute => attribute) as Attr[];
     }
 
+    /**
+     * return a variable with name. coerces to a number js style.
+     */
     getVariableNumber(name: string): number | null {
         const value = this.getVariable(name);
         if (typeof value === 'string') return +value;
         return null;
     }
 
+    /**
+     * return true if a variable with name is present, false otherwise.
+     */
     getVariableBoolean(name: string): boolean {
         const value = this.getVariable(name);
         // boolean attributes are HTML attributes, absence equals false.
@@ -71,6 +100,14 @@ export class VNVarContainer extends VNViewBoxBase {
     }
 }
 
+/**
+ * the main component.
+ *
+ * @example
+ * ```
+ * <vn-viewbox></vn-viewbox>
+ * ```
+ */
 export class VNViewBox extends VNVarContainer {
     #activeScript: VNScript | null = null;
     readonly #style: HTMLStyleElement;
@@ -90,9 +127,17 @@ export class VNViewBox extends VNVarContainer {
     connectedCallback(): void {
     }
 
-    start(): void {
-        const autoplay: VNScript | null = this.querySelector('vn-script[autoplay]');
-        if (this.shadowRoot && autoplay) {
+    /**
+     * start the visual novel, optionally pass a VNScript. the VNScript will loop over its children sequentially.
+     */
+    start(manualplay?: VNScript): void {
+        let play: VNScript | null;
+        if (manualplay instanceof VNScript) {
+            play = manualplay;
+        } else {
+            play = this.querySelector('vn-script[autoplay]');
+        }
+        if (this.shadowRoot && play) {
             Array.from(this.children, function (each) {
                 const slot = each.getAttribute('slot');
                 if (typeof slot === 'string') {
@@ -105,18 +150,21 @@ export class VNViewBox extends VNVarContainer {
             svg.setAttribute('viewBox', `0 0 1920 1080`);
             this.shadowRoot!.replaceChildren(this.#style, svg, div);
             div.style.position = 'absolute';
-            this.#activeScript = autoplay;
             div.style.padding = '0.5em';
+            this.#activeScript = play;
             svg.style.height = '100%';
             svg.style.width = '100%';
             div.style.height = '30%';
             div.style.width = '100%';
             div.style.top = '75%';
             // noinspection JSIgnoredPromiseFromCall
-            autoplay.run(this);
+            play.run(this);
         }
     }
 
+    /**
+     * the current active script.
+     */
     activeScript(): VNScript | null {
         return this.#activeScript;
     }
@@ -138,6 +186,9 @@ export class VNViewBox extends VNVarContainer {
     }
 }
 
+/**
+ * the main worker of the experience.
+ */
 export class VNScript extends VNVarContainer {
     #currentElement: null | Element = null;
     #noskip = false;
@@ -147,12 +198,25 @@ export class VNScript extends VNVarContainer {
         this.attachShadow({mode: 'open'});
     }
 
+    /**
+     * run the script.
+     *
+     * fires a `'vn-scriptstart'` event. then loops over each child and calls its `vnExecute` method if it has one,
+     * otherwise it skips the element. `<template>` elements are cloned and parsed as scripts then executed.
+     *
+     * each element moved to fires a `'vn-exec'` event that bubbles, is composed and is cancelable,
+     * when canceled the entire VNScript enters an async halt. fire `'vn-resume'` to resume operations.
+     *
+     * fires `'vn-scriptend'` when there are no more children after the currentElement
+     * and therefore `nextElementSibling` is null.
+     */
     async run(vnViewBox: VNViewBox): Promise<void> {
         const event = new CustomEvent('vn-scriptstart', {
             detail: {'this': this}, cancelable: false,
             bubbles: true, composed: true,
         });
         this.dispatchEvent(event);
+        if (this.#currentElement) throw TypeError('his.#currentElement is not null');
         this.#currentElement = this.firstElementChild;
         this.#noskip = false;
         if (this.#currentElement) {
@@ -188,12 +252,25 @@ export class VNScript extends VNVarContainer {
         }
     }
 
+    /**
+     * programmatically sets the currentElement to the one given, the element is not skipped.
+     */
     setCurrentElement(to: Element): void {
         this.#currentElement = to;
         this.#noskip = true;
     }
 }
 
+/**
+ * the main hook where advanced operations will be executed.
+ *
+ * when `vnExecute` (when the element is reached by a VNScript) it fires a `'vn-event'`
+ * that bubbles, is composed and is not cancelable, its detail has the following TypeScript shape.
+ * `{details: {vn: VNViewBox, currentScript: VNScript}, resolve: (value: unknown) => void,
+ * reject: (reason?: any) => void, 'this': VNEvent}`.
+ *
+ * call either `resolve` or `reject` to continue or throw the script respectively.
+ */
 export class VNEvent extends VNViewBoxBase {
     vnExecute(vn: VNViewBox, currentScript: VNScript): Promise<unknown> {
         const {promise, resolve, reject} = Promise.withResolvers<unknown>(),
@@ -207,12 +284,18 @@ export class VNEvent extends VNViewBoxBase {
         return promise.then(promiseValue => ({cancelled, promiseValue}));
     }
 
+    /**
+     * get the timeout
+     */
     get timeout(): number | null {
         const timeout = this.getAttribute('timeout');
         if (timeout === null) return null;
         return +timeout;
     }
 
+    /**
+     * set a timeout
+     */
     set timeout(value: number | null) {
         if (value === null) this.removeAttribute('timeout');
         else this.setAttribute('timeout', `${+value}`);
@@ -230,6 +313,12 @@ abstract class VNInternalExecutableTag extends VNExecutableTag {
     }
 }
 
+/**
+ * the main text display. supports `{{this-syntax}}` for variables which can be turned off with the `noInterpolate` attribute.
+ *
+ * @warning VNText interpolation happens once at execution time.
+ * Dynamic updates to variables won't reflect in already-displayed text.
+ */
 export class VNText extends VNInternalExecutableTag {
     readonly #button: HTMLButtonElement | null = null;
     #interpolated = false;
@@ -299,11 +388,17 @@ export class VNText extends VNInternalExecutableTag {
     }
 }
 
+/**
+ * placeholder tag.
+ */
 class VNPointerTag extends VNInternalExecutableTag {
     vnExecute(_vn: VNViewBox) {
     }
 }
 
+/**
+ * visual novels are known for their branching paths. when a `VNChoice` is encountered its `VNOpt`s are displayed as options.
+ */
 export class VNChoice extends VNInternalExecutableTag {
     constructor() {
         super('manual');
@@ -339,6 +434,9 @@ export class VNChoice extends VNInternalExecutableTag {
     }
 }
 
+/**
+ * jump to any tag in the script. if the currentScript does not contain that tag then nothing happens.
+ */
 export class VNJumpTo extends VNViewBoxBase {
     get jumpTo(): string | null {
         return this.getAttribute('jumpto');
@@ -358,6 +456,9 @@ export class VNJumpTo extends VNViewBoxBase {
         else this.setAttribute('jumpto-variable', where);
     }
 
+    /**
+     * resolve the jumpto settings and return a html element or null if it isnt found.
+     */
     resolveJumpTo(vn: VNViewBox, currentScript: VNScript): Element | null {
         const {jumpTo, jumpToVariable} = this;
         let where = jumpTo;
@@ -382,11 +483,16 @@ export class VNJumpTo extends VNViewBoxBase {
     }
 }
 
+/**
+ * an option for a `vn-choice`
+ */
 export class VNOpt extends VNJumpTo {
     // vnExecute will not be executed as long as it is a child of VNChoice.
 }
 
-
+/**
+ * a string interpolated variable. will be installed in a VNText with no `noInterpolate` attribute.
+ */
 export class VNGetVar extends VNInternalExecutableTag {
     interpolate(vn: VNViewBox): void {
         const {name} = this, variable = typeof name == 'string' ? (vn.getVariable(name) ?? null) : null;
@@ -408,6 +514,9 @@ export class VNGetVar extends VNInternalExecutableTag {
     }
 }
 
+/**
+ * sets or deletes a variable.
+ */
 export class VNSetVar extends VNInternalExecutableTag {
     vnExecute(vn: VNViewBox, currentScript: VNScript): void {
         const {name, value} = this;
@@ -464,6 +573,9 @@ export class VNSetVar extends VNInternalExecutableTag {
     }
 }
 
+/**
+ * sequential logic.
+ */
 export class VNIf extends VNExecutableTag {
     async vnExecute(vn: VNViewBox, _currentScript: VNScript): Promise<void> {
         let currentElement = this.firstElementChild,
