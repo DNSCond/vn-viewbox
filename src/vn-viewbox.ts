@@ -5,7 +5,35 @@ export class VNViewBoxBase extends HTMLElement {
     }
 }
 
-export class VNViewBox extends VNViewBoxBase {
+export class VNVarContainer extends VNViewBoxBase {
+    getVariable(name: string): string | null | undefined {
+        if (/^[a-z\-0-9_]+$/i.test(name)) {
+            const localname = `data-varset-${name}`;
+            return this.getAttribute(localname);
+        }
+        return undefined;
+    }
+
+    setVariable(name: string, value: string | null | undefined): void {
+        if (name && /^[a-z\-0-9_]+$/i.test(name)) {
+            const localname = `data-varset-${name}`;
+            if (typeof value === 'string') {
+                this.setAttribute(localname, value);
+            } else {
+                this.removeAttribute(localname);
+            }
+        }
+    }
+
+    getAllVariables(): Attr[] {
+        return Array.from(this.attributes, attribute => {
+            if (attribute.name.startsWith('data-varset-')) return attribute;
+            return null;
+        }).filter(attribute => attribute) as Attr[];
+    }
+}
+
+export class VNViewBox extends VNVarContainer {
     #activeScript: VNScript | null = null;
     readonly #style: HTMLStyleElement;
 
@@ -71,29 +99,9 @@ export class VNViewBox extends VNViewBoxBase {
         this.dispatchEvent(event);
         throw errorValue;
     }
-
-    getVariable(name: string): string | null | undefined {
-        if (name && /^[a-z\-0-9_]+$/i.test(name)) {
-            const localname = `data-varset-${name}`;
-            return this.getAttribute(localname);
-        }
-        return undefined;
-    }
-
-    setVariable(name: string, value: string | null | undefined): void {
-        if (name && /^[a-z\-0-9_]+$/i.test(name)) {
-            const localname = `data-varset-${name}`;
-            if (typeof value === 'string') {
-                this.setAttribute(localname, value);
-            } else {
-                this.removeAttribute(localname);
-            }
-        }
-    }
 }
 
-export class VNScript extends VNViewBoxBase {
-    #isPaused = false;
+export class VNScript extends VNVarContainer {
     #currentElement: null | Element = null;
     #noskip = false;
 
@@ -114,22 +122,24 @@ export class VNScript extends VNViewBoxBase {
             // noinspection JSAssignmentUsedAsCondition
             do {
                 this.#noskip = false;
-                if (this.#isPaused) {
-                    // Return a promise that resolves when resume() is called
-                    await new Promise(resolve => vnViewBox.addEventListener(
-                        'vn-resume', resolve, {once: true}));
-                    this.#isPaused = false;
-                }
                 if (!this.contains(this.#currentElement)) {
                     throw new DOMException("this.#currentElement must be within this", 'HierarchyRequestError');
+                } else if (this.#currentElement instanceof HTMLTemplateElement) {
+                    const script = this.ownerDocument.createElement('vn-script') as VNScript;
+                    script.replaceChildren(this.#currentElement.content.cloneNode(true));
+                    this.insertAdjacentElement('afterend', script);
+                    await script.run(vnViewBox);
                 } else if ('vnExecute' in this.#currentElement) {
                     const execEvent = new CustomEvent('vn-exec', {
-                        bubbles: true, cancelable: true, detail: {vn: vnViewBox},
-                    });
+                            bubbles: true, cancelable: true, detail: {vn: vnViewBox},
+                        }), abortController = new AbortController, {signal} = abortController,
+                        {promise, resolve, reject} = Promise.withResolvers();
+                    promise.then(() => void abortController.abort());
+                    vnViewBox.addEventListener('vn-resume', resolve, {signal, once: true});
                     if (!this.#currentElement.dispatchEvent(execEvent)) {
-                        this.#isPaused = true;
+                        await promise;
                         continue;
-                    }
+                    } else reject();
                     await (this.#currentElement as VNExecutableTag).vnExecute(vnViewBox, this);
                 }
             } while (this.#noskip || (this.#currentElement = this.#currentElement.nextElementSibling));
@@ -185,6 +195,7 @@ abstract class VNInternalExecutableTag extends VNExecutableTag {
 
 export class VNText extends VNInternalExecutableTag {
     readonly #button: HTMLButtonElement | null = null;
+    #interpolated = false;
 
     constructor(text?: string) {
         super();
@@ -198,12 +209,56 @@ export class VNText extends VNInternalExecutableTag {
     vnExecute(vn: VNViewBox): Promise<void> {
         const placeholder = new VNPointerTag, {promise, resolve} = Promise.withResolvers<unknown>();
         this.insertAdjacentElement('afterend', placeholder);
+        this.interpolateText();
         this.querySelectorAll('vn-getvar').forEach(each => void (each as VNGetVar).interpolate(vn));
         // vn.activeScript()!.setCurrentElement(placeholder);
         vn.append(this);
         vn._setTextElement(this);
         this.#button!.addEventListener('click', resolve);
         return promise.then(() => void placeholder.replaceWith(this));
+    }
+
+    interpolateText(): void {
+        if (this.#interpolated || this.noInterpolate) {
+            return;
+        }
+        this.#interpolated = true;
+        const walker = this.ownerDocument.createTreeWalker(this, NodeFilter.SHOW_TEXT, null), targets = [];
+        let node;
+        while (node = walker.nextNode()) {
+            if (node.textContent?.includes('{{')) {
+                targets.push(node);
+            }
+        }
+        targets.forEach(textNode => this.processSingleNode(textNode as Text));
+    }
+
+    processSingleNode(textNode: Text): void {
+        const fragment = new DocumentFragment,
+            text = textNode.textContent,
+            regex = /\{\{(.+?)}}/g, node = textNode;
+        let lastIndex = 0, match: RegExpMatchArray | null;
+        while ((match = regex.exec(text)) !== null) {
+            if (match.index! > lastIndex) {
+                fragment.appendChild(document.createTextNode(text.slice(lastIndex, match.index)));
+            }
+            const getVar = this.ownerDocument.createElement('vn-getvar');
+            getVar.setAttribute('name', match[1]!.trim());
+            fragment.appendChild(getVar);
+            lastIndex = regex.lastIndex;
+        }
+        if (lastIndex < text.length) {
+            fragment.appendChild(document.createTextNode(text.slice(lastIndex)));
+        }
+        node.parentNode!.replaceChild(fragment, node);
+    }
+
+    get noInterpolate(): boolean {
+        return this.hasAttribute('noInterpolate');
+    }
+
+    set noInterpolate(value: boolean) {
+        setBooleanAttribute(this, 'noInterpolate', value);
     }
 }
 
@@ -297,7 +352,7 @@ export class VNOpt extends VNJumpTo {
 
 export class VNGetVar extends VNInternalExecutableTag {
     interpolate(vn: VNViewBox): void {
-        const {name} = this, variable = vn.getVariable(name ?? '') ?? null;
+        const {name} = this, variable = typeof name == 'string' ? (vn.getVariable(name) ?? null) : null;
         if (typeof variable === 'string') {
             this.shadowRoot!.replaceChildren(variable);
         }
@@ -317,10 +372,16 @@ export class VNGetVar extends VNInternalExecutableTag {
 }
 
 export class VNSetVar extends VNInternalExecutableTag {
-    vnExecute(vn: VNViewBox, _currentScript: VNScript): void {
+    vnExecute(vn: VNViewBox, currentScript: VNScript): void {
         const {name, value} = this;
         if (typeof name === 'string') {
-            vn.setVariable(name as string, (value ?? this.textContent?.trim()) || null);
+            switch (this.scope) {
+                case 'script':
+                    currentScript.setVariable(name as string, (value ?? this.textContent?.trim()) || null);
+                    break;
+                default:
+                    vn.setVariable(name as string, (value ?? this.textContent?.trim()) || null);
+            }
         }
     }
 
@@ -340,6 +401,15 @@ export class VNSetVar extends VNInternalExecutableTag {
     set value(value: string | null) {
         if (value === null) this.removeAttribute('value');
         else this.setAttribute('value', value);
+    }
+
+    get scope(): string | null {
+        return this.getAttribute('scope');
+    }
+
+    set scope(value: string | null) {
+        if (value === null) this.removeAttribute('scope');
+        else this.setAttribute('scope', value);
     }
 }
 
