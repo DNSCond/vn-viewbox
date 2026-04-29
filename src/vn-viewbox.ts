@@ -148,12 +148,12 @@ export class VNScript extends VNViewBoxBase {
 }
 
 export class VNEvent extends VNViewBoxBase {
-    vnExecute(details: any, cancelable = false): Promise<unknown> {
-        const {promise, resolve, reject} = Promise.withResolvers<unknown>();
-        const event = new CustomEvent('vn-event', {
-            detail: {details, resolve, reject, 'this': this},
-            cancelable, bubbles: true, composed: true,
-        }), {timeout} = this;
+    vnExecute(vn: VNViewBox, currentScript: VNScript): Promise<unknown> {
+        const {promise, resolve, reject} = Promise.withResolvers<unknown>(),
+            details = {vn, currentScript}, event = new CustomEvent('vn-event', {
+                detail: {details, resolve, reject, 'this': this},
+                cancelable: false, bubbles: true, composed: true,
+            }), {timeout} = this;
         if (Number.isSafeInteger(timeout) && (timeout as number) > 0)
             setTimeout(() => resolve('TimeoutError'), timeout as number);
         const cancelled = !this.dispatchEvent(event);
