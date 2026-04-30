@@ -111,6 +111,7 @@ export class VNVarContainer extends VNViewBoxBase {
 export class VNViewBox extends VNVarContainer {
     #activeScript: VNScript | null = null;
     readonly #style: HTMLStyleElement;
+    #readyState = true;
 
     constructor() {
         super();
@@ -125,12 +126,35 @@ export class VNViewBox extends VNVarContainer {
     }
 
     connectedCallback(): void {
+        const waitFor = this.waitForElementsArray() ?? Array();
+        if (waitFor?.length > 0) {
+            this.#readyState = false;
+            const timeout = this.elementWaitTimeout ?? (6 * 1000),
+                timeoutPromiseResolvers = Promise.withResolvers();
+            setTimeout(timeoutPromiseResolvers.reject, timeout);
+            // =/^[a-z][^\/>A-Z]*-[^\/>A-Z]*$/.test
+            Promise.race([Promise.allSettled(waitFor.map(elementName =>
+                customElements.whenDefined(elementName))), timeoutPromiseResolvers.promise]
+            ).then(undefined, rejected => {
+                const elements = waitFor.flatMap(elementName =>
+                    !customElements.get(elementName) ? elementName : Array());
+                console.error(`some elements have not loaded, in particular [${elements.join(',\x20')}]`);
+                throw rejected;
+            }).finally(() => void (this.#readyState = true));
+        }
+    }
+
+    checkHealth(): void {
+        this.querySelectorAll("*").forEach(each => void (each as any).checkHealth?.(this));
     }
 
     /**
      * start the visual novel, optionally pass a VNScript. the VNScript will loop over its children sequentially.
      */
     start(manualplay?: VNScript): void {
+        if (!this.#readyState) {
+            throw Error('readyState is false. wait for the elements to load');
+        }
         let play: VNScript | null;
         if (manualplay instanceof VNScript) {
             play = manualplay;
@@ -184,6 +208,41 @@ export class VNViewBox extends VNVarContainer {
         this.dispatchEvent(event);
         throw errorValue;
     }
+
+    set waitForElements(value: string | Array<string> | null) {
+        if (Array.isArray(value)) {
+            value = value.join('\x20');
+        }
+        if (value === null) this.removeAttribute('wait-for-element');
+        else this.setAttribute('wait-for-element', value.toLowerCase());
+    }
+
+    get waitForElements(): string | null {
+        return this.getAttribute('element-wait-timeout');
+    }
+
+    waitForElementsArray(): Array<string> | null {
+        const {waitForElements} = this;
+        if (waitForElements === null) return waitForElements;
+        return waitForElements.toLowerCase().split(/\s+/g);
+    }
+
+    /**
+     * get the timeout
+     */
+    get elementWaitTimeout(): number | null {
+        const timeout = this.getAttribute('element-wait-timeout');
+        if (timeout === null) return null;
+        return +timeout;
+    }
+
+    /**
+     * set a timeout
+     */
+    set elementWaitTimeout(value: number | null) {
+        if (value === null) this.removeAttribute('element-wait-timeout');
+        else this.setAttribute('element-wait-timeout', `${+value}`);
+    }
 }
 
 /**
@@ -211,18 +270,23 @@ export class VNScript extends VNVarContainer {
      * and therefore `nextElementSibling` is null.
      */
     async run(vnViewBox: VNViewBox): Promise<void> {
+        if (this.#currentElement) throw TypeError('his.#currentElement is not null');
         const event = new CustomEvent('vn-scriptstart', {
             detail: {'this': this}, cancelable: false,
             bubbles: true, composed: true,
         });
         this.dispatchEvent(event);
-        if (this.#currentElement) throw TypeError('his.#currentElement is not null');
         this.#currentElement = this.firstElementChild;
         this.#noskip = false;
         if (this.#currentElement) {
             // noinspection JSAssignmentUsedAsCondition
             do {
                 this.#noskip = false;
+                let lookahead: Element | null = this.#currentElement;
+                for (let i = 0; i < 5; i++) {
+                    (lookahead as VNPreloadedExecutableTag)?.vnPreload?.(vnViewBox, this);
+                    lookahead = lookahead?.nextElementSibling ?? null;
+                }
                 if (!this.contains(this.#currentElement)) {
                     throw new DOMException("this.#currentElement must be within this", 'HierarchyRequestError');
                 } else if (this.#currentElement instanceof HTMLTemplateElement) {
@@ -258,6 +322,14 @@ export class VNScript extends VNVarContainer {
     setCurrentElement(to: Element): void {
         this.#currentElement = to;
         this.#noskip = true;
+    }
+
+    get preloadEnabled(): boolean {
+        return this.hasAttribute('preload-enabled');
+    }
+
+    set preloadEnabled(value: boolean | null) {
+        setBooleanAttribute(this, 'preload-enabled', value);
     }
 }
 
@@ -311,6 +383,11 @@ abstract class VNInternalExecutableTag extends VNExecutableTag {
         super();
         this.attachShadow({mode: 'open', slotAssignment: slotType}).append(this.ownerDocument.createElement('slot'));
     }
+}
+
+export abstract class VNPreloadedExecutableTag extends VNViewBoxBase {
+    // the promise is ignored.
+    abstract vnPreload(vn: VNViewBox, currentScript: VNScript): Promise<unknown | void> | unknown | void;
 }
 
 /**
@@ -459,7 +536,7 @@ export class VNJumpTo extends VNViewBoxBase {
     /**
      * resolve the jumpto settings and return a html element or null if it isnt found.
      */
-    resolveJumpTo(vn: VNViewBox, currentScript: VNScript): Element | null {
+    resolveJumpTo(vn: VNViewBox, currentScript?: VNScript): Element | null {
         const {jumpTo, jumpToVariable} = this;
         let where = jumpTo;
         if (jumpToVariable !== null) {
@@ -468,7 +545,7 @@ export class VNJumpTo extends VNViewBoxBase {
         if (where !== null) {
             const element = this.ownerDocument.getElementById(where);
             // cross script jumps can be done later.
-            if (element) if (currentScript.contains(element)) {
+            if (element) if ((currentScript ?? vn)?.contains(element)) {
                 return element;
             }
         }
@@ -480,6 +557,10 @@ export class VNJumpTo extends VNViewBoxBase {
         if (element) {
             currentScript.setCurrentElement(element);
         }
+    }
+
+    checkHealth(vn: VNViewBox): void {
+        if (this.resolveJumpTo(vn) === null) console.error(this, 'cannot find its jump target');
     }
 }
 

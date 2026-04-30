@@ -13,10 +13,11 @@
     </vn-script>
 </vn-viewbox>
 <script type=module>
-    import "./dist/vn-viewbox.js";
+    import {VNScript} from "./dist/vn-viewbox.js";
 
     document.querySelector('vn-event').timeout = 500;
     document.querySelector('vn-viewbox').addEventListener('vnscriptend', console.log, {once: true});
+    console.log(String(new VNScript));
 </script>
 </body>
 </html>
