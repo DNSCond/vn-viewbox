@@ -82,6 +82,16 @@ export class VNVarContainer extends VNViewBoxBase {
     }
 
     /**
+     * returns all variable a ans object.
+     */
+    getAllVariablesAsObject(): { [key: string]: string } {
+        // noinspection JSPrimitiveTypeWrapperUsage
+        const result: any = new Object;
+        this.getAllVariables().forEach(each => void Reflect.set(result, each.name.replace(/^data-varset-/i, String()), each.value));
+        return result;
+    }
+
+    /**
      * return a variable with name. coerces to a number js style.
      */
     getVariableNumber(name: string): number | null {
@@ -296,16 +306,18 @@ export class VNScript extends VNVarContainer {
                     await script.run(vnViewBox);
                 } else if ('vnExecute' in this.#currentElement) {
                     const execEvent = new CustomEvent('vn-exec', {
-                            bubbles: true, cancelable: true, detail: {vn: vnViewBox},
-                        }), abortController = new AbortController, {signal} = abortController,
-                        {promise, resolve} = Promise.withResolvers();
-                    promise.then(() => void abortController.abort());
+                            bubbles: true, cancelable: true,
+                            detail: {vn: vnViewBox}, composed: false,
+                        }), abortController = new AbortController,
+                        {signal} = abortController, {promise, resolve} = Promise.withResolvers();
+                    promise.then(() => void abortController.abort(), () => void abortController.abort());
                     vnViewBox.addEventListener('vn-resume', resolve, {signal, once: true});
                     if (!this.#currentElement.dispatchEvent(execEvent)) {
                         await promise;
                         continue;
                     } else resolve(undefined);
-                    await (this.#currentElement as VNExecutableTag).vnExecute(vnViewBox, this);
+                    await Promise.try(() => (this.#currentElement as VNExecutableTag).vnExecute(vnViewBox, this)
+                    ).catch(error => vnViewBox.throw(error));
                 }
             } while (this.#noskip || (this.#currentElement = this.#currentElement.nextElementSibling));
             const event = new CustomEvent('vn-scriptend', {
