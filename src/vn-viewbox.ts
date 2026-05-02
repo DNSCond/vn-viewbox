@@ -46,24 +46,25 @@ export class VNVarContainer extends VNViewBoxBase {
     }
 
     setVariable(name: string, value: string | null): void {
-        if (this.variablesAllowed) {
-            if (name && /^[a-z\-0-9_]+$/i.test(name)) {
-                const localname = `data-varset-${name}`;
-                if (typeof value === 'string') {
-                    this.setAttribute(localname, value);
-                } else {
-                    this.removeAttribute(localname);
+        if (name)
+            if (this.variablesAllowed) {
+                if (/^[a-z\-0-9_]+$/i.test(name)) {
+                    const localname = `data-varset-${name}`;
+                    if (typeof value === 'string') {
+                        this.setAttribute(localname, value);
+                    } else {
+                        this.removeAttribute(localname);
+                    }
+                }
+            } else if (/^local-/i.test(name)) {
+                let parent: HTMLElement | undefined | null = this;
+                // noinspection JSAssignmentUsedAsCondition
+                while (parent = parent?.parentElement) {
+                    if ((parent instanceof VNVarContainer) && parent.variablesAllowed) {
+                        parent.setVariable(name, value);
+                    }
                 }
             }
-        } else {
-            let parent: HTMLElement | undefined | null = this;
-            // noinspection JSAssignmentUsedAsCondition
-            while (parent = parent?.parentElement) {
-                if ((parent instanceof VNVarContainer) && parent.variablesAllowed) {
-                    parent.setVariable(name, value);
-                }
-            }
-        }
     }
 
     delVariable(name: string): void {
@@ -161,7 +162,7 @@ export class VNViewBox extends VNVarContainer {
     /**
      * start the visual novel, optionally pass a VNScript. the VNScript will loop over its children sequentially.
      */
-    start(manualplay?: VNScript): void {
+    start(manualplay?: VNScript): Promise<unknown> {
         if (!this.#readyState) {
             throw Error('readyState is false. wait for the elements to load');
         }
@@ -191,9 +192,9 @@ export class VNViewBox extends VNVarContainer {
             div.style.height = '30%';
             div.style.width = '100%';
             div.style.top = '75%';
-            // noinspection JSIgnoredPromiseFromCall
-            play.run(this);
+            return play.run(this);
         }
+        return Promise.resolve(undefined);
     }
 
     /**
@@ -228,7 +229,7 @@ export class VNViewBox extends VNVarContainer {
     }
 
     get waitForElements(): string | null {
-        return this.getAttribute('element-wait-timeout');
+        return this.getAttribute('wait-for-element');
     }
 
     waitForElementsArray(): Array<string> | null {
@@ -284,7 +285,7 @@ export class VNScript extends VNVarContainer {
         const event = new CustomEvent('vn-scriptstart', {
             detail: {'this': this}, cancelable: false,
             bubbles: true, composed: true,
-        });
+        }), preload_weakset = new WeakSet;
         this.dispatchEvent(event);
         this.#currentElement = this.firstElementChild;
         this.#noskip = false;
@@ -294,8 +295,10 @@ export class VNScript extends VNVarContainer {
                 this.#noskip = false;
                 let lookahead: Element | null = this.#currentElement;
                 for (let i = 0; i < 5; i++) {
+                    if (preload_weakset.has(lookahead as WeakKey)) continue;
+                    else if (lookahead !== null) preload_weakset.add(lookahead);
                     (lookahead as VNPreloadedExecutableTag)?.vnPreload?.(vnViewBox, this);
-                    lookahead = lookahead?.nextElementSibling ?? null;
+                    (lookahead = lookahead?.nextElementSibling ?? null);
                 }
                 if (!this.contains(this.#currentElement)) {
                     throw new DOMException("this.#currentElement must be within this", 'HierarchyRequestError');
@@ -346,26 +349,34 @@ export class VNScript extends VNVarContainer {
 }
 
 /**
- * the main hook where advanced operations will be executed.
+ * Pauses script execution until an external event handler resolves.
  *
- * when `vnExecute` (when the element is reached by a VNScript) it fires a `'vn-event'`
- * that bubbles, is composed and is not cancelable, its detail has the following TypeScript shape.
+ * CRITICAL: This element MUST be used with an event listener that calls resolve(),
+ * otherwise the script will hang forever (or until timeout).
+ *
+ * its detail has the following TypeScript shape.
  * `{details: {vn: VNViewBox, currentScript: VNScript}, resolve: (value: unknown) => void,
  * reject: (reason?: any) => void, 'this': VNEvent}`.
  *
- * call either `resolve` or `reject` to continue or throw the script respectively.
+ * @example
+ * <vn-event timeout="5000"></vn-event>
+ *
+ * @warning The timeout RESOLVES with 'TimeoutError' string, does NOT reject.
+ * @warning If no event handler calls resolve/reject and preventDefault is called, execution never continues.
+ *
+ * @attribute timeout - Milliseconds before auto-resolving with 'TimeoutError'
  */
 export class VNEvent extends VNViewBoxBase {
-    vnExecute(vn: VNViewBox, currentScript: VNScript): Promise<unknown> {
+    vnExecute(vn: VNViewBox, currentScript: VNScript): Promise<unknown> | void {
         const {promise, resolve, reject} = Promise.withResolvers<unknown>(),
             details = {vn, currentScript}, event = new CustomEvent('vn-event', {
                 detail: {details, resolve, reject, 'this': this},
-                cancelable: false, bubbles: true, composed: true,
+                cancelable: true, bubbles: true, composed: true,
             }), {timeout} = this;
         if (Number.isSafeInteger(timeout) && (timeout as number) > 0)
             setTimeout(() => resolve('TimeoutError'), timeout as number);
         const cancelled = !this.dispatchEvent(event);
-        return promise.then(promiseValue => ({cancelled, promiseValue}));
+        if (cancelled) return promise;//.then(promiseValue => ({cancelled, promiseValue}));
     }
 
     /**
@@ -407,6 +418,7 @@ export abstract class VNPreloadedExecutableTag extends VNViewBoxBase {
  *
  * @warning VNText interpolation happens once at execution time.
  * Dynamic updates to variables won't reflect in already-displayed text.
+ * but will the next time this element is encountered.
  */
 export class VNText extends VNInternalExecutableTag {
     readonly #button: HTMLButtonElement | null = null;
@@ -612,21 +624,72 @@ export class VNGetVar extends VNInternalExecutableTag {
  */
 export class VNSetVar extends VNInternalExecutableTag {
     vnExecute(vn: VNViewBox, currentScript: VNScript): void {
-        const {name, value} = this;
+        const {name, value, scope, operator, deleteVariable} = this;
         if (typeof name === 'string') {
-            if (this.deleteVariable) switch (this.scope) {
-                case 'script':
-                    currentScript.delVariable(name as string);
-                    break;
-                default:
-                    vn.delVariable(name as string);
-            } else switch (this.scope) {
-                case 'script':
-                    currentScript.setVariable(name as string, (value ?? this.textContent?.trim()) || null);
-                    break;
-                default:
-                    vn.setVariable(name as string, (value ?? this.textContent?.trim()) || null);
+            let newValue = value;
+            if (!deleteVariable) {
+                const existingVariable = (scope === 'script' ? currentScript : vn).getVariable(name as string);
+                const oldValue = +(value ?? 0), existingVariableAsNumber = +(existingVariable ?? 0);
+                switch (operator?.toLowerCase()) {
+                    case 'concat-space':
+                        newValue = (existingVariable ?? "") + '\x20' + (value ?? "");
+                        break;
+                    case 'concat':
+                        newValue = (existingVariable ?? "") + (value ?? "");
+                        break;
+                    case '+':
+                    case 'add':
+                        newValue = String((+existingVariableAsNumber) + (+oldValue));
+                        break;
+                    case '-':
+                    case 'sub':
+                    case 'subtract':
+                        newValue = String(existingVariableAsNumber - oldValue);
+                        break;
+                    case '*':
+                    case 'mul':
+                    case 'multiply':
+                        newValue = String(existingVariableAsNumber * oldValue);
+                        break;
+                    case '/':
+                    case 'div':
+                    case 'divide':
+                        newValue = String(existingVariableAsNumber / oldValue);
+                        break;
+                    case '%':
+                    case 'rem':
+                    case 'remainder':
+                        newValue = String(existingVariableAsNumber % oldValue);
+                        break;
+                    case '~':
+                    case 'not':
+                    case 'bitwise-not':
+                        newValue = String(~existingVariableAsNumber);
+                        break;
+                    case '&':
+                    case 'and':
+                    case 'bitwise-and':
+                        newValue = String(existingVariableAsNumber & oldValue);
+                        break;
+                    case '|':
+                    case 'or':
+                    case 'bitwise-or':
+                        newValue = String(existingVariableAsNumber | oldValue);
+                        break;
+                    case '^':
+                    case 'xor':
+                    case 'bitwise-xor':
+                        newValue = String(existingVariableAsNumber ^ oldValue);
+                        break;
+                    case '**':
+                    case 'exp':
+                    case 'exponentiation':
+                        newValue = String(existingVariableAsNumber ** oldValue);
+                        break;
+                }
             }
+            (scope === 'script' ? currentScript : vn).setVariable(name as string,
+                deleteVariable ? null : (newValue ?? this.textContent?.trim() ?? null));
         }
     }
 
@@ -648,6 +711,15 @@ export class VNSetVar extends VNInternalExecutableTag {
         else this.setAttribute('value', value);
     }
 
+    get operator(): string | null {
+        return this.getAttribute('operator');
+    }
+
+    set operator(value: string | null) {
+        if (value === null) this.removeAttribute('operator');
+        else this.setAttribute('operator', value);
+    }
+
     get scope(): string | null {
         return this.getAttribute('scope');
     }
@@ -667,7 +739,24 @@ export class VNSetVar extends VNInternalExecutableTag {
 }
 
 /**
- * sequential logic.
+ * Conditional branching container.
+ *
+ * Children are evaluated in order:
+ * - `<vn-and>`/`<vn-or>`/`<vn-not>`: Update accumulator (starts as true for AND/OR, false for NOT)
+ * - `<vn-script>`: Executes if accumulator is true, then resets accumulator to true
+ * - `<vn-else>`: Executes ONLY if no script has run yet in this VNIf
+ *
+ * @example
+ * <vn-if>
+ *   <vn-and operator="equals" variable-left="hp" value-right="0"></vn-and>
+ *   <vn-script>You died!</vn-script>
+ *   <vn-and operator="greater-than" variable-left="score" value-right="100"></vn-and>
+ *   <vn-script>High score!</vn-script>
+ *   <vn-else>Game continues...</vn-else>
+ * </vn-if>
+ *
+ * @attribute evaluation-type - "run-all" executes all matching branches, otherwise stops at first match
+ * @warning these only allow basic operations. to do anything mildly complex use {@link VNEvent} and javascript.
  */
 export class VNIf extends VNExecutableTag {
     async vnExecute(vn: VNViewBox, _currentScript: VNScript): Promise<void> {
@@ -683,8 +772,10 @@ export class VNIf extends VNExecutableTag {
             } else if (currentElement instanceof VNScript) {
                 if (value) await currentElement.run(vn);
                 anythingRan = true;
-                // reset the accumulator for else if branches.
-                value = true;
+                // Inside vnExecute method:
+                value = true; // Reset accumulator for next condition block
+                // IMPORTANT: Each <vn-script> (or other executable) gets a fresh accumulator.
+                // Without this reset, a previous false would cascade through remaining OR conditions.
                 if (this.evaluationType !== 'run-all') return;
             }
         } while ((currentElement = currentElement.nextElementSibling));
@@ -811,6 +902,49 @@ class VNElse extends VNScript {
     override variablesAllowed = false;
 }
 
+class VNWait extends VNExecutableTag {
+    vnExecute(_vn: VNViewBox, _currentScript: VNScript): Promise<unknown | void> | unknown | void {
+        const {duration} = this;
+        if (typeof duration === 'number') {
+            return new Promise(resolve => void setTimeout(resolve, duration));
+        }
+    }
+
+    /**
+     * get the duration in milliseconds
+     */
+    get duration(): number | null {
+        const duration = this.getAttribute('duration');
+        if (duration === null) return null;
+        return +duration;
+    }
+
+    /**
+     * set a duration in milliseconds
+     */
+    set duration(value: number | null) {
+        if (value === null) this.removeAttribute('duration');
+        else this.setAttribute('duration', `${+value}`);
+    }
+}
+
+export class VNBranch extends VNInternalExecutableTag {
+    async vnExecute(vn: VNViewBox, currentScript: VNScript): Promise<void> {
+        // Collect weighted options
+        const options: Array<{ option: VNOpt, weight: number }> = [];
+        let totalWeight = 0;
+
+        for (const opt of this.querySelectorAll('vn-opt')) {
+            const weight = Number(opt.getAttribute('weight')) || 1;
+            options.push(Object.freeze({option: opt as VNOpt, weight}));
+            totalWeight += weight;
+        }
+        const selected = await vnRandomWeighted<VNOpt>(this, options);
+
+        if (this.contains(selected)) selected.vnExecute(vn, currentScript);
+    }
+}
+
 const styles = `:host {
     display: block;
     position: relative;
@@ -850,9 +984,11 @@ const elements = {
     'vn-getvar': VNGetVar,
     'vn-setvar': VNSetVar,
     'vn-jumpto': VNJumpTo,
+    'vn-branch': VNBranch,
     'vn-event': VNEvent,
     'vn-text': VNText,
     'vn-else': VNElse,
+    'vn-wait': VNWait,
     'vn-opt': VNOpt,
     'vn-and': VNAnd,
     'vn-not': VNNOT,
@@ -886,4 +1022,52 @@ export function setBooleanAttribute(element: HTMLElement, name: string, value: b
         default:
             throw TypeError(name + ' is a boolean attribute. only string, true, false, null allowed');
     }
+}
+
+export async function vnRandomIntEvent(eventTarget: EventTarget, min: number, max: number): Promise<number> {
+    if (!Number.isSafeInteger(min) || !Number.isSafeInteger(max)) throw RangeError("min or max arent safe integers");
+    if (min > max) throw RangeError("min cannot be greater than max");
+    const {promise, resolve} = Promise.withResolvers<number>();
+    if (eventTarget.dispatchEvent(new CustomEvent("vn-random", {
+        detail: Object.freeze({min, max, resolve, eventTarget}),
+        cancelable: true, bubbles: true, composed: true,
+    }))) resolve(randomInt(min, max));
+    return promise.then(Number).then(number => {
+        if (number < +min) throw RangeError("the number is less than minimum allowed");
+        if (number >= max) throw RangeError("the number is more or equal than maximum allowed");
+        if (Number.isSafeInteger(number)) return number;
+        throw RangeError("the number is not a safe integer");
+    });
+}
+
+export async function vnRandomWeighted<T>(eventTarget: EventTarget, options: Array<{
+    option: T, weight: number
+}>): Promise<T> {
+    const totalWeight = options.reduce((prev, curr) => prev + curr.weight, 0),
+        {promise, resolve, reject} = Promise.withResolvers<T>();
+    if (Number.isSafeInteger(totalWeight)) {
+        if (eventTarget.dispatchEvent(new CustomEvent("vn-random-weighted", {
+            detail: Object.freeze({options, resolve, eventTarget}),
+            cancelable: true, bubbles: true, composed: true,
+        }))) {
+            let random = await vnRandomIntEvent(eventTarget, Number(), totalWeight);
+            let selected: T | null = null;
+            for (const {option, weight} of options) {
+                random -= weight;
+                if (random <= 0) {
+                    selected = option;
+                    break;
+                }
+            }
+            if (selected !== null) resolve(selected);
+            else reject(TypeError('no suitable found'));
+        }
+    } else reject(RangeError('totalWeight isnt a safe integer, did you use floats or non numeric strings?'));
+    return promise;
+}
+
+// For integer random (since vnRandomIntEvent implies integer)
+function randomInt(min: number, max: number): number {
+    if (!Number.isSafeInteger(min) || !Number.isSafeInteger(max)) throw RangeError("min or max arent safe integers");
+    return Math.floor(Math.random() * (max - min)) + min;
 }
