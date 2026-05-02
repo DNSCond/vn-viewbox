@@ -88,7 +88,8 @@ export class VNVarContainer extends VNViewBoxBase {
     getAllVariablesAsObject(): { [key: string]: string } {
         // noinspection JSPrimitiveTypeWrapperUsage
         const result: any = new Object;
-        this.getAllVariables().forEach(each => void Reflect.set(result, each.name.replace(/^data-varset-/i, String()), each.value));
+        this.getAllVariables().forEach(each => void Reflect.set(result,
+            each.name.replace(/^data-varset-/i, String()), each.value));
         return result;
     }
 
